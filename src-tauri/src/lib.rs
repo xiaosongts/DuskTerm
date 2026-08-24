@@ -91,6 +91,7 @@ pub fn run() {
             background::import_background_image,
             background::ensure_background_image,
             background::delete_background_image,
+            background::cleanup_background_resources,
             local_terminal::list_local_shell_profiles,
             native_drag::native_drag_capabilities,
             native_drag::start_native_local_file_drag,

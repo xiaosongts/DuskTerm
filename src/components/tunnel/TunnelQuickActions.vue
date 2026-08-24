@@ -1,11 +1,12 @@
 <script setup>
+import { TooltipHint } from '@/components/ui/tooltip';
 import { confirm } from '@/composables/useConfirm';
 import { toast } from '@/composables/useToast';
 import { invokeCommand } from '@/utils/ipc';
 import { notifyTunnelsChanged, TUNNELS_CHANGED_EVENT } from '@/utils/tunnelEvents';
 import { ArrowRight, LoaderCircle, Network, Play, Square } from '@lucide/vue';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui';
+import { PopoverAnchor, PopoverContent, PopoverPortal, PopoverRoot } from 'reka-ui';
 
 const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
 
@@ -216,20 +217,25 @@ onUnmounted(() => {
 <template>
   <div v-if="configs.length" class="tunnel-quick-actions">
     <PopoverRoot v-model:open="open">
-      <PopoverTrigger as-child>
-        <button
-          type="button"
-          class="tunnel-quick-trigger"
-          :class="{ 'is-open': open, 'has-running': runningCount > 0 }"
-          :aria-label="`当前会话隧道（${runningCount}/${configs.length} 运行中）`"
-          title="当前会话隧道"
-          @mousedown.stop
-          @click.stop
-        >
-          <Network :size="15" stroke-width="1.9" />
-          <span v-if="runningCount" class="tunnel-running-dot" aria-hidden="true" />
-        </button>
-      </PopoverTrigger>
+      <PopoverAnchor as-child>
+        <span class="tunnel-quick-anchor">
+          <TooltipHint text="当前会话隧道" side="bottom">
+          <button
+            type="button"
+            class="tunnel-quick-trigger"
+            :class="{ 'is-open': open, 'has-running': runningCount > 0 }"
+            :aria-label="`当前会话隧道（${runningCount}/${configs.length} 运行中）`"
+            :aria-expanded="open"
+            aria-haspopup="dialog"
+            @mousedown.stop
+            @click.stop="open = !open"
+          >
+            <Network :size="15" stroke-width="1.9" />
+            <span v-if="runningCount" class="tunnel-running-dot" aria-hidden="true" />
+          </button>
+          </TooltipHint>
+        </span>
+      </PopoverAnchor>
 
       <PopoverPortal>
         <PopoverContent
@@ -239,6 +245,7 @@ onUnmounted(() => {
           :collision-padding="12"
           class="tunnel-quick-popover"
           @mousedown.stop
+          @open-auto-focus.prevent
         >
           <div class="tunnel-quick-header">
             <strong>当前会话隧道</strong>
@@ -261,29 +268,35 @@ onUnmounted(() => {
                     {{ isRunning(config.id) ? '运行中' : '已停止' }}
                   </span>
                 </div>
-                <div class="tunnel-endpoint" :title="endpoint(config)">
-                  <span>{{ config.listenHost }}:{{ config.listenPort }}</span>
-                  <template v-if="config.mode !== 'dynamic'">
-                    <ArrowRight :size="12" />
-                    <span>{{ config.targetHost }}:{{ config.targetPort }}</span>
-                  </template>
-                  <span v-else>SOCKS5</span>
-                </div>
+                <TooltipHint :text="endpoint(config)" side="bottom" align="start">
+                  <div class="tunnel-endpoint">
+                    <span>{{ config.listenHost }}:{{ config.listenPort }}</span>
+                    <template v-if="config.mode !== 'dynamic'">
+                      <ArrowRight :size="12" />
+                      <span>{{ config.targetHost }}:{{ config.targetPort }}</span>
+                    </template>
+                    <span v-else>SOCKS5</span>
+                  </div>
+                </TooltipHint>
               </div>
 
-              <button
-                type="button"
-                class="tunnel-row-action"
-                :class="{ 'is-stop': isRunning(config.id) }"
-                :disabled="isPending(config.id)"
-                :aria-label="`${isRunning(config.id) ? '停止' : '启动'} ${config.name}`"
-                :title="isRunning(config.id) ? '停止隧道' : '启动隧道'"
-                @click.stop="toggleConfig(config)"
+              <TooltipHint
+                :text="isPending(config.id) ? '正在处理' : (isRunning(config.id) ? '停止隧道' : '启动隧道')"
+                side="left"
               >
-                <LoaderCircle v-if="isPending(config.id)" :size="14" class="tunnel-spinner" />
-                <Square v-else-if="isRunning(config.id)" :size="13" fill="currentColor" />
-                <Play v-else :size="14" fill="currentColor" />
-              </button>
+                <button
+                  type="button"
+                  class="tunnel-row-action"
+                  :class="{ 'is-stop': isRunning(config.id) }"
+                  :aria-disabled="isPending(config.id)"
+                  :aria-label="`${isRunning(config.id) ? '停止' : '启动'} ${config.name}`"
+                  @click.stop="toggleConfig(config)"
+                >
+                  <LoaderCircle v-if="isPending(config.id)" :size="14" class="tunnel-spinner" />
+                  <Square v-else-if="isRunning(config.id)" :size="13" fill="currentColor" />
+                  <Play v-else :size="14" fill="currentColor" />
+                </button>
+              </TooltipHint>
             </div>
           </div>
 
@@ -300,6 +313,10 @@ onUnmounted(() => {
   z-index: 21;
   top: 8px;
   right: 52px;
+}
+
+.tunnel-quick-anchor {
+  display: inline-flex;
 }
 
 .tunnel-quick-trigger {
@@ -490,7 +507,7 @@ onUnmounted(() => {
   transition: color var(--app-motion-control), background var(--app-motion-control), opacity var(--app-motion-control);
 }
 
-:global(.tunnel-row-action:hover:not(:disabled)) {
+:global(.tunnel-row-action:hover:not([aria-disabled="true"])) {
   background: hsl(var(--accent));
 }
 
@@ -498,7 +515,7 @@ onUnmounted(() => {
   color: hsl(var(--destructive));
 }
 
-:global(.tunnel-row-action:disabled) {
+:global(.tunnel-row-action[aria-disabled="true"]) {
   cursor: wait;
   opacity: .55;
 }

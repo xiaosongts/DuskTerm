@@ -813,13 +813,11 @@ const isSyncInputVisible = ref(false);
 const mainUiSettings = ref(loadMainUiSettings());
 const backgroundAvailable = ref(false);
 const backgroundActive = computed(() => mainUiSettings.value.background?.enabled && backgroundAvailable.value);
-watch(backgroundActive, () => {
+watch(backgroundActive, async (active) => {
+  await nextTick();
   requestAnimationFrame(() => {
-    window.dispatchEvent(new CustomEvent('main-ui-settings-changed', {
-      detail: {
-        preview: true,
-        settings: mainUiSettings.value
-      }
+    window.dispatchEvent(new CustomEvent('global-background-availability-changed', {
+      detail: { active }
     }));
   });
 });
@@ -1119,6 +1117,13 @@ const refreshMainUiSettings = (event) => {
     : loadMainUiSettings();
 };
 
+const cleanupUnusedBackgroundResources = () => {
+  const retainedResourceIds = normalizeMainUiSettings(mainUiSettings.value).background.recentAssets
+    .map((asset) => asset.resourceId)
+    .filter(Boolean);
+  void invokeCommand('cleanup_background_resources', { retainedResourceIds }).catch(() => {});
+};
+
 onMounted(async () => {
   const unlistenSshHostkey = await listenEvent('ssh-hostkey-request', showHostkeyPrompt);
   const unlistenSftpHostkey = await listenEvent('sftp-hostkey-request', showHostkeyPrompt);
@@ -1130,6 +1135,7 @@ onMounted(async () => {
   sshStore.loadSavedSessions();
   loadKeybindings();
   refreshMainUiSettings();
+  cleanupUnusedBackgroundResources();
   // Scope storage events to relevant keys to avoid unnecessary work
   const _onStorage = (e) => {
     if (!e.key || e.key.startsWith('main-ui') || e.key.startsWith('keybinding')) {
@@ -1370,12 +1376,11 @@ useWindowInteraction({ onResize: measureWorkspace });
   left: 50%;
   display: flex;
   width: calc(100vw - 24px);
-  height: 86px;
   align-items: flex-start;
   justify-content: center;
   box-sizing: border-box;
   pointer-events: none;
-  overflow: hidden;
+  overflow: visible;
   transform: translateX(-50%);
 }
 

@@ -15,7 +15,7 @@ import {
   Terminal
 } from '@lucide/vue';
 import { open } from '@tauri-apps/plugin-dialog';
-import { computed, defineAsyncComponent, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue';
 import { useSecurityStore } from '@/stores/security';
 import { useCommandHistoryStore } from '@/stores/commandHistory';
 import {
@@ -61,13 +61,41 @@ const settingsTabs = [
 const terminalThemeSettings = ref(loadTerminalThemeSettings());
 const commandHistorySettings = ref(loadPreference('commandHistory'));
 const mainUiSettings = ref(loadMainUiSettings());
-let persistedBackgroundId = '';
+let persistedBackgroundIds = new Set();
 const temporaryBackgroundIds = new Set();
+const pendingBackgroundCleanupIds = new Set();
 const backgroundImporting = ref(false);
+let backgroundPreviewFrame = null;
+
+const getBackgroundResourceIds = (settings) => {
+  const background = normalizeMainUiSettings(settings).background;
+  return new Set(background.recentAssets.map((asset) => asset.resourceId).filter(Boolean));
+};
 
 const deleteBackgroundResource = async (resourceId) => {
-  if (!resourceId) return;
-  try { await invokeCommand('delete_background_image', { resourceId }); } catch { /* best-effort cleanup */ }
+  if (!resourceId) return true;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await invokeCommand('delete_background_image', { resourceId });
+      return true;
+    } catch {
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  }
+  return false;
+};
+
+const waitForBackgroundRelease = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+};
+
+const deleteBackgroundResources = async (resourceIds) => {
+  const uniqueIds = [...new Set(resourceIds)].filter(Boolean);
+  const results = await Promise.all(uniqueIds.map(async (resourceId) => ({
+    resourceId,
+    deleted: await deleteBackgroundResource(resourceId),
+  })));
+  return results.filter((result) => !result.deleted).map((result) => result.resourceId);
 };
 
 const handleBackgroundImported = (resourceId) => {
@@ -76,12 +104,22 @@ const handleBackgroundImported = (resourceId) => {
 const selectedDesktopPetNodeId = ref('');
 
 const dispatchMainUiSettingsPreview = () => {
-  window.dispatchEvent(new CustomEvent('main-ui-settings-changed', {
-    detail: {
-      preview: true,
-      settings: normalizeMainUiSettings(mainUiSettings.value)
-    }
-  }));
+  if (backgroundPreviewFrame) cancelAnimationFrame(backgroundPreviewFrame);
+  backgroundPreviewFrame = requestAnimationFrame(() => {
+    backgroundPreviewFrame = null;
+    window.dispatchEvent(new CustomEvent('main-ui-settings-changed', {
+      detail: {
+        preview: true,
+        settings: normalizeMainUiSettings(mainUiSettings.value)
+      }
+    }));
+  });
+};
+
+const cancelMainUiSettingsPreview = () => {
+  if (!backgroundPreviewFrame) return;
+  cancelAnimationFrame(backgroundPreviewFrame);
+  backgroundPreviewFrame = null;
 };
 
 const defaultKeybindings = getPreferenceDefaults('keybindings');
@@ -171,7 +209,8 @@ watch(() => props.visible, (val) => {
     terminalThemeSettings.value = loadTerminalThemeSettings();
     commandHistorySettings.value = loadPreference('commandHistory');
     mainUiSettings.value = loadMainUiSettings();
-    persistedBackgroundId = mainUiSettings.value.background?.resourceId || '';
+    persistedBackgroundIds = getBackgroundResourceIds(mainUiSettings.value);
+    temporaryBackgroundIds.forEach((resourceId) => pendingBackgroundCleanupIds.add(resourceId));
     temporaryBackgroundIds.clear();
     ensureSelectedDesktopPetNode();
   } else {
@@ -181,6 +220,7 @@ watch(() => props.visible, (val) => {
 
 const handleSave = async () => {
   if (backgroundImporting.value) return;
+  cancelMainUiSettingsPreview();
   if (keybindingConflictEntries.value.length > 0) {
     const conflictText = keybindingConflictEntries.value
       .map((entry) => `${entry.labels.join('、')}（${entry.combo}）`)
@@ -225,27 +265,49 @@ const handleSave = async () => {
       toast.error('最近会话数量应用失败');
     }
   }
-  const currentBackgroundId = mainUiSettings.value.background?.resourceId || '';
-  await Promise.all([...temporaryBackgroundIds]
-    .filter((resourceId) => resourceId !== currentBackgroundId)
-    .map(deleteBackgroundResource));
-  if (persistedBackgroundId && persistedBackgroundId !== currentBackgroundId) {
-    await deleteBackgroundResource(persistedBackgroundId);
-  }
+  const currentBackgroundIds = getBackgroundResourceIds(mainUiSettings.value);
+  await waitForBackgroundRelease();
+  const cleanupCandidates = [
+    ...temporaryBackgroundIds,
+    ...persistedBackgroundIds,
+    ...pendingBackgroundCleanupIds,
+  ].filter((resourceId) => !currentBackgroundIds.has(resourceId));
+  const failedCleanupIds = await deleteBackgroundResources(cleanupCandidates);
+  pendingBackgroundCleanupIds.clear();
+  failedCleanupIds.forEach((resourceId) => pendingBackgroundCleanupIds.add(resourceId));
   temporaryBackgroundIds.clear();
-  persistedBackgroundId = currentBackgroundId;
+  persistedBackgroundIds = currentBackgroundIds;
   emit('update:visible', false);
+  if (failedCleanupIds.length) toast.error('部分旧背景文件暂时无法清理，将在下次启动时重试');
   toast.success('设置已保存');
 };
 
 const handleCancel = async () => {
   if (backgroundImporting.value) return;
-  await Promise.all([...temporaryBackgroundIds].map(deleteBackgroundResource));
-  temporaryBackgroundIds.clear();
+  cancelMainUiSettingsPreview();
+  const cleanupCandidates = [...temporaryBackgroundIds, ...pendingBackgroundCleanupIds];
   window.dispatchEvent(new CustomEvent('main-ui-settings-changed'));
+  await waitForBackgroundRelease();
+  const failedCleanupIds = await deleteBackgroundResources(cleanupCandidates);
+  pendingBackgroundCleanupIds.clear();
+  failedCleanupIds.forEach((resourceId) => pendingBackgroundCleanupIds.add(resourceId));
+  temporaryBackgroundIds.clear();
   window.dispatchEvent(new CustomEvent('terminal-theme-changed'));
   emit('update:visible', false);
+  if (failedCleanupIds.length) toast.error('部分临时背景文件暂时无法清理，将在下次启动时重试');
 };
+
+onBeforeUnmount(() => {
+  cancelMainUiSettingsPreview();
+  const cleanupCandidates = [...temporaryBackgroundIds, ...pendingBackgroundCleanupIds];
+  temporaryBackgroundIds.clear();
+  if (!cleanupCandidates.length) return;
+  window.dispatchEvent(new CustomEvent('main-ui-settings-changed'));
+  void (async () => {
+    await waitForBackgroundRelease();
+    await deleteBackgroundResources(cleanupCandidates);
+  })();
+});
 
 const previewTerminalTheme = (settings) => {
   window.dispatchEvent(new CustomEvent('terminal-theme-changed', {

@@ -14,7 +14,7 @@ import { toast } from '@/composables/useToast';
 import { invokeCommand } from '@/utils/ipc';
 import { normalizeBackgroundSettings, resolveBackgroundUrl } from '@/utils/background';
 import { open } from '@tauri-apps/plugin-dialog';
-import { GripVertical, HelpCircle, Plus, RefreshCw, Trash2, Upload } from '@lucide/vue';
+import { GripVertical, HelpCircle, Plus, RefreshCw, Trash2, Upload, Video } from '@lucide/vue';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 const { isDark, toggleTheme, isFollowingSystem, followSystem, setTheme } = useTheme();
@@ -71,17 +71,13 @@ const draggingNodeId = ref('');
 const dragOverNodeId = ref('');
 const isPointerDragging = ref(false);
 const isImportingBackground = ref(false);
-const backgroundPreview = ref('');
+const backgroundPreviews = ref([]);
+const videoThumbnailCache = new Map();
+const activeVideoThumbnailCancels = new Set();
+let backgroundPreviewToken = 0;
 const displayTarget = () => {
   const scale = window.devicePixelRatio || 1;
   return { targetWidth: Math.round(window.screen.width * scale), targetHeight: Math.round(window.screen.height * scale) };
-};
-const refreshBackgroundPreview = async (resourceId) => {
-  if (!resourceId) { backgroundPreview.value = ''; return; }
-  try {
-    const asset = await invokeCommand('ensure_background_image', { resourceId, ...displayTarget() });
-    backgroundPreview.value = resolveBackgroundUrl(asset.optimized_path);
-  } catch { backgroundPreview.value = ''; }
 };
 
 const ensureBackgroundSettings = () => {
@@ -89,48 +85,244 @@ const ensureBackgroundSettings = () => {
   return props.mainUiSettings.background;
 };
 
+const normalizedBackground = computed(() => normalizeBackgroundSettings(props.mainUiSettings.background || {}));
+const isVideoBackground = computed(() => normalizedBackground.value.mediaType === 'video');
+
+const captureVideoThumbnail = (url) => new Promise((resolve, reject) => {
+  const video = document.createElement('video');
+  let settled = false;
+  let timeout = null;
+  const cleanup = () => {
+    if (timeout) clearTimeout(timeout);
+    activeVideoThumbnailCancels.delete(cancel);
+    video.pause();
+    video.onloadeddata = null;
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
+  };
+  const finish = (value, error = null) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    if (error) reject(error);
+    else resolve(value);
+  };
+  const cancel = () => finish(null, new Error('视频缩略图任务已取消'));
+  activeVideoThumbnailCancels.add(cancel);
+  timeout = setTimeout(() => finish(null, new Error('读取视频信息超时')), 12000);
+  video.muted = true;
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+  video.preload = 'auto';
+  video.onloadeddata = () => {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      finish(null, new Error('无法读取视频尺寸'));
+      return;
+    }
+    let thumbnailUrl = '';
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 180;
+      const scale = Math.max(canvas.width / width, canvas.height / height);
+      const sourceWidth = canvas.width / scale;
+      const sourceHeight = canvas.height / scale;
+      const sourceX = (width - sourceWidth) / 2;
+      const sourceY = (height - sourceHeight) / 2;
+      canvas.getContext('2d')?.drawImage(
+        video,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+      thumbnailUrl = canvas.toDataURL('image/jpeg', 0.76);
+    } catch {
+      // The media remains usable even if the asset protocol disallows canvas extraction.
+    }
+    finish({ width, height, duration: Number(video.duration) || 0, thumbnailUrl });
+  };
+  video.onerror = () => finish(null, new Error('当前系统无法播放该视频，请使用 MP4(H.264) 或 WebM'));
+  video.src = url;
+  video.load();
+});
+
+const cancelVideoThumbnailCaptures = () => {
+  for (const cancel of [...activeVideoThumbnailCancels]) cancel();
+};
+
+const pruneVideoThumbnailCache = (items) => {
+  const retainedResourceIds = new Set(items.map((item) => item.resourceId));
+  for (const resourceId of videoThumbnailCache.keys()) {
+    if (!retainedResourceIds.has(resourceId)) videoThumbnailCache.delete(resourceId);
+  }
+};
+
+const resolveBackgroundPreview = async (item) => {
+  const asset = await invokeCommand('ensure_background_image', {
+    resourceId: item.resourceId,
+    ...displayTarget(),
+  });
+  const mediaType = asset.media_type === 'video' ? 'video' : 'image';
+  const mediaUrl = resolveBackgroundUrl(asset.optimized_path);
+  let thumbnailUrl = resolveBackgroundUrl(asset.thumbnail_path);
+  if (mediaType === 'video' && mediaUrl) {
+    const cached = videoThumbnailCache.get(item.resourceId);
+    if (cached) thumbnailUrl = cached;
+    else {
+      try {
+        const metadata = await captureVideoThumbnail(mediaUrl);
+        thumbnailUrl = metadata.thumbnailUrl;
+        if (thumbnailUrl) videoThumbnailCache.set(item.resourceId, thumbnailUrl);
+      } catch {
+        thumbnailUrl = '';
+      }
+    }
+  }
+  return {
+    resourceId: item.resourceId,
+    fileName: asset.file_name || item.fileName,
+    mediaType,
+    mediaUrl,
+    thumbnailUrl,
+    available: !!mediaUrl,
+  };
+};
+
+const refreshBackgroundPreviews = async () => {
+  const token = ++backgroundPreviewToken;
+  const items = normalizedBackground.value.recentAssets;
+  cancelVideoThumbnailCaptures();
+  pruneVideoThumbnailCache(items);
+  const previews = [];
+  for (const item of items) {
+    try {
+      previews.push(await resolveBackgroundPreview(item));
+    } catch {
+      previews.push({ ...item, mediaUrl: '', thumbnailUrl: '', available: false });
+    }
+    if (token !== backgroundPreviewToken) return;
+  }
+  backgroundPreviews.value = previews;
+};
+
 const notifyBackgroundPreviewChange = () => {
   emit('background-preview-change');
 };
 
 const selectBackgroundImage = async () => {
-  const selected = await open({ multiple: false, filters: [{ name: '静态图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }] });
+  const selected = await open({
+    multiple: false,
+    filters: [{ name: '背景媒体', extensions: ['png', 'jpg', 'jpeg', 'webp', 'mp4', 'webm'] }]
+  });
   if (!selected) return;
+  backgroundPreviewToken += 1;
+  cancelVideoThumbnailCaptures();
   const sourcePath = typeof selected === 'string' ? selected : selected.path;
   isImportingBackground.value = true;
   emit('background-importing', true);
+  let importedResourceId = '';
   try {
     const asset = await invokeCommand('import_background_image', {
       sourcePath,
       ...displayTarget(),
     });
+    importedResourceId = asset.resource_id;
+    emit('background-imported', asset.resource_id);
+    const mediaType = asset.media_type === 'video' ? 'video' : 'image';
+    const mediaUrl = resolveBackgroundUrl(asset.optimized_path);
+    let thumbnailUrl = resolveBackgroundUrl(asset.thumbnail_path);
+    if (mediaType === 'video') {
+      const metadata = await captureVideoThumbnail(mediaUrl);
+      if (metadata.width * metadata.height > 3840 * 2160) {
+        throw new Error('视频分辨率不能超过 3840×2160，推荐使用 1080p/30fps');
+      }
+      thumbnailUrl = metadata.thumbnailUrl;
+      if (thumbnailUrl) videoThumbnailCache.set(asset.resource_id, thumbnailUrl);
+    }
+    const recentAsset = {
+      resourceId: asset.resource_id,
+      fileName: asset.file_name,
+      mediaType,
+    };
     props.mainUiSettings.background = normalizeBackgroundSettings({
       ...props.mainUiSettings.background,
       enabled: true,
-      resourceId: asset.resource_id,
-      fileName: asset.file_name,
+      ...recentAsset,
+      fit: mediaType === 'video' && props.mainUiSettings.background?.fit === 'tile'
+        ? 'cover'
+        : props.mainUiSettings.background?.fit,
+      recentAssets: [recentAsset, ...(props.mainUiSettings.background?.recentAssets || [])],
     });
-    backgroundPreview.value = resolveBackgroundUrl(asset.optimized_path);
-    emit('background-imported', asset.resource_id);
+    backgroundPreviews.value = [{ ...recentAsset, mediaUrl, thumbnailUrl, available: true }, ...backgroundPreviews.value]
+      .filter((item, index, list) => list.findIndex((entry) => entry.resourceId === item.resourceId) === index)
+      .slice(0, 3);
+    importedResourceId = '';
     notifyBackgroundPreviewChange();
-  } catch (error) { toast.error(`背景图片导入失败：${error}`); }
+  } catch (error) {
+    if (importedResourceId) {
+      try { await invokeCommand('delete_background_image', { resourceId: importedResourceId }); } catch { /* best-effort cleanup */ }
+    }
+    toast.error(`背景媒体导入失败：${error}`);
+  }
   finally { isImportingBackground.value = false; emit('background-importing', false); }
 };
 
 const removeBackgroundImage = () => {
-  props.mainUiSettings.background = normalizeBackgroundSettings();
-  backgroundPreview.value = '';
+  const current = normalizedBackground.value;
+  const recentAssets = current.recentAssets.filter((asset) => asset.resourceId !== current.resourceId);
+  const next = recentAssets[0] || null;
+  props.mainUiSettings.background = normalizeBackgroundSettings({
+    ...current,
+    enabled: !!next,
+    resourceId: next?.resourceId || '',
+    fileName: next?.fileName || '',
+    mediaType: next?.mediaType || 'image',
+    fit: next?.mediaType === 'video' && current.fit === 'tile' ? 'cover' : current.fit,
+    recentAssets,
+  });
+  notifyBackgroundPreviewChange();
+};
+
+const selectRecentBackground = (item) => {
+  if (!item?.resourceId || !item.available) return;
+  const current = normalizedBackground.value;
+  const selected = current.recentAssets.find((asset) => asset.resourceId === item.resourceId);
+  if (!selected) return;
+  props.mainUiSettings.background = normalizeBackgroundSettings({
+    ...current,
+    ...selected,
+    enabled: true,
+    fit: selected.mediaType === 'video' && current.fit === 'tile' ? 'cover' : current.fit,
+    recentAssets: [selected, ...current.recentAssets.filter((asset) => asset.resourceId !== selected.resourceId)],
+  });
   notifyBackgroundPreviewChange();
 };
 
 ensureBackgroundSettings();
-watch(() => props.mainUiSettings.background?.resourceId, refreshBackgroundPreview, { immediate: true });
 watch(() => [
+  props.mainUiSettings.background?.enabled,
+  props.mainUiSettings.background?.resourceId,
+  props.mainUiSettings.background?.fit,
   props.mainUiSettings.background?.blur,
   props.mainUiSettings.background?.opacity,
   props.mainUiSettings.background?.darkOverlay,
   props.mainUiSettings.background?.lightOverlay
 ], notifyBackgroundPreviewChange);
+watch(
+  () => normalizedBackground.value.recentAssets
+    .map((asset) => `${asset.resourceId}:${asset.mediaType}`)
+    .join('|'),
+  () => { void refreshBackgroundPreviews(); },
+  { immediate: true }
+);
 
 const getNodeDisplayName = (node, index) => node?.name?.trim() || `节点 ${index + 1}`;
 
@@ -201,6 +393,9 @@ const handlePointerDragEnd = (event) => {
 };
 
 onBeforeUnmount(() => {
+  backgroundPreviewToken += 1;
+  cancelVideoThumbnailCaptures();
+  videoThumbnailCache.clear();
   resetDraggingState();
 });
 </script>
@@ -247,16 +442,30 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="settings-section idea-panel background-settings">
-      <div class="settings-section-title-wrap"><div class="settings-section-title">全局背景图片</div></div>
-      <div class="background-preview" :class="{ empty: !backgroundPreview }"
-        :style="backgroundPreview ? { backgroundImage: `url(${backgroundPreview})` } : null">
-        <span v-if="!backgroundPreview">未选择背景图片</span>
+      <div class="settings-section-title-wrap"><div class="settings-section-title">全局背景</div></div>
+      <div v-if="backgroundPreviews.length" class="background-recent" aria-label="最近使用的背景">
+        <Tooltip v-for="item in backgroundPreviews" :key="item.resourceId">
+          <TooltipTrigger as-child>
+            <button type="button" class="background-recent-item"
+              :class="{ active: item.resourceId === normalizedBackground.resourceId, unavailable: !item.available }"
+              :aria-disabled="isImportingBackground || !item.available"
+              @click="!isImportingBackground && selectRecentBackground(item)">
+              <span class="background-recent-thumb"
+                :style="item.thumbnailUrl ? { backgroundImage: `url(${item.thumbnailUrl})` } : null">
+                <Video v-if="item.mediaType === 'video' && !item.thumbnailUrl" />
+              </span>
+              <span class="background-recent-name">{{ item.fileName || '背景媒体' }}</span>
+              <span v-if="item.mediaType === 'video'" class="background-media-badge">视频</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{{ item.fileName || '背景媒体' }}</TooltipContent>
+        </Tooltip>
       </div>
-      <div class="setting-row"><div class="setting-label">启用背景</div><Switch v-model="mainUiSettings.background.enabled" :disabled="!backgroundPreview" /></div>
-      <div class="setting-row background-actions"><div class="setting-label">图片文件</div><span class="background-file">{{ mainUiSettings.background.fileName || '无' }}</span><Button size="sm" variant="outline" :disabled="isImportingBackground" @click="selectBackgroundImage">{{ isImportingBackground ? '处理中…' : '选择图片' }}</Button><Button size="sm" variant="outline" :disabled="!backgroundPreview" @click="removeBackgroundImage">移除</Button></div>
-      <div class="setting-row"><div class="setting-label">铺放方式</div><Select v-model="mainUiSettings.background.fit"><SelectTrigger size="sm" class="background-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cover">填充</SelectItem><SelectItem value="contain">适应</SelectItem><SelectItem value="stretch">拉伸</SelectItem><SelectItem value="center">居中</SelectItem><SelectItem value="tile">平铺</SelectItem></SelectContent></Select></div>
+      <div class="setting-row"><div class="setting-label">启用背景</div><Switch v-model="mainUiSettings.background.enabled" :disabled="!normalizedBackground.resourceId" /></div>
+      <div class="setting-row background-actions"><div class="setting-label">媒体文件</div><span class="background-file">{{ mainUiSettings.background.fileName || '无' }}</span><Button size="sm" variant="outline" :disabled="isImportingBackground" @click="selectBackgroundImage">{{ isImportingBackground ? '处理中…' : '选择媒体' }}</Button><Button size="sm" variant="outline" :disabled="!normalizedBackground.resourceId" @click="removeBackgroundImage">移除</Button></div>
+      <div class="setting-row"><div class="setting-label">铺放方式</div><Select v-model="mainUiSettings.background.fit"><SelectTrigger size="sm" class="background-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cover">填充</SelectItem><SelectItem value="contain">适应</SelectItem><SelectItem value="stretch">拉伸</SelectItem><SelectItem value="center">居中</SelectItem><SelectItem value="tile" :disabled="isVideoBackground">平铺</SelectItem></SelectContent></Select></div>
       <div class="setting-row"><div class="setting-label">模糊度</div><Slider v-model="mainUiSettings.background.blur" :min="0" :max="40" :step="1" class="line-slider" /><span class="setting-value">{{ mainUiSettings.background.blur }}px</span></div>
-      <div class="setting-row"><div class="setting-label">图片透明度</div><Slider v-model="mainUiSettings.background.opacity" :min="0" :max="1" :step="0.05" class="line-slider" /><span class="setting-value">{{ Math.round(mainUiSettings.background.opacity * 100) }}%</span></div>
+      <div class="setting-row"><div class="setting-label">背景透明度</div><Slider v-model="mainUiSettings.background.opacity" :min="0" :max="1" :step="0.05" class="line-slider" /><span class="setting-value">{{ Math.round(mainUiSettings.background.opacity * 100) }}%</span></div>
       <div class="setting-row"><div class="setting-label">暗色遮罩</div><Slider v-model="mainUiSettings.background.darkOverlay" :min="0" :max="0.9" :step="0.05" class="line-slider" /><span class="setting-value">{{ Math.round(mainUiSettings.background.darkOverlay * 100) }}%</span></div>
       <div class="setting-row"><div class="setting-label">亮色遮罩</div><Slider v-model="mainUiSettings.background.lightOverlay" :min="0" :max="0.9" :step="0.05" class="line-slider" /><span class="setting-value">{{ Math.round(mainUiSettings.background.lightOverlay * 100) }}%</span></div>
     </div>
@@ -498,8 +707,15 @@ onBeforeUnmount(() => {
   @apply w-20;
 }
 
-.background-preview { height: 120px; margin: 8px 0 12px; border: 1px solid var(--app-border-shadow); border-radius: 8px; background-position: center; background-size: cover; }
-.background-preview.empty { display: flex; align-items: center; justify-content: center; color: var(--app-text-muted); background: var(--app-input-bg); }
+.background-recent { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 8px 0 12px; }
+.background-recent-item { position: relative; min-width: 0; padding: 4px; overflow: hidden; border: 1px solid var(--app-border-shadow); border-radius: 8px; background: color-mix(in srgb, var(--app-input-bg) 88%, transparent); color: var(--app-text-muted); text-align: left; cursor: pointer; }
+.background-recent-item:hover { border-color: color-mix(in srgb, var(--color-primary) 55%, var(--app-border-shadow)); }
+.background-recent-item.active { border-color: var(--color-primary); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-primary) 45%, transparent); }
+.background-recent-item.unavailable { opacity: 0.55; cursor: not-allowed; }
+.background-recent-thumb { display: flex; width: 100%; aspect-ratio: 16 / 9; align-items: center; justify-content: center; overflow: hidden; border-radius: 5px; background: color-mix(in srgb, var(--app-bg-dialog) 82%, #000); background-position: center; background-size: cover; }
+.background-recent-thumb svg { width: 22px; height: 22px; }
+.background-recent-name { display: block; padding: 4px 2px 1px; overflow: hidden; color: var(--app-text); font-size: 11px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.background-media-badge { position: absolute; top: 8px; right: 8px; padding: 1px 5px; border-radius: 999px; background: rgba(0, 0, 0, 0.68); color: #fff; font-size: 9px; line-height: 15px; }
 .background-actions { gap: 8px; }
 .background-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-text-muted); font-size: 12px; }
 .background-select { width: 140px; }

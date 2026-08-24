@@ -189,6 +189,7 @@
     --z-dialog-overlay: 2000;
     --z-dialog-content: 2010;
     --z-select: 2100;
+    --z-tooltip: 2150;
     --z-alert: 2200;
     --z-critical-overlay: 3000;
   }

@@ -42,11 +42,10 @@ const toastIconMap = {
   display: flex;
   width: 100%;
   max-width: 100%;
-  max-height: 86px;
   align-items: flex-start;
   justify-content: center;
   pointer-events: none;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .toast-track {
@@ -67,19 +66,18 @@ const toastIconMap = {
   display: flex;
   width: max-content;
   min-width: 0;
-  max-width: min(360px, calc(100vw - 32px));
-  height: 26px;
+  max-width: min(720px, calc(100vw - 32px));
+  min-height: 26px;
   flex: 0 0 auto;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  overflow: hidden;
   border: 1px solid var(--app-toast-border);
   border-radius: var(--niri-radius-md, 8px);
   color: var(--app-toast-text);
   background: var(--app-toast-bg);
   box-shadow: var(--app-toast-shadow);
   box-sizing: border-box;
-  padding: 0 8px;
+  padding: 5px 8px;
   font-size: 12px;
   line-height: 16px;
   transform: translateY(0);
@@ -100,6 +98,7 @@ const toastIconMap = {
 
 .toast-icon {
   flex: 0 0 auto;
+  margin-top: 1px;
   color: var(--toast-tone);
 }
 
@@ -110,9 +109,9 @@ const toastIconMap = {
 .toast-message {
   min-width: 0;
   flex: 0 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .toast-card--success { --toast-tone: var(--app-toast-success); }

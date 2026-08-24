@@ -1000,7 +1000,7 @@ const handleTerminalThemeChanged = (event) => {
   onTerminalThemeChanged();
 };
 
-const handleMainUiChanged = () => requestAnimationFrame(applyTerminalTheme);
+const handleGlobalBackgroundAvailabilityChanged = () => requestAnimationFrame(applyTerminalTheme);
 
 watch(isDark, () => {
   applyTerminalTheme();
@@ -3402,7 +3402,7 @@ onMounted(async () => {
   quickCommandHandler = handleKnowledgeCommandEvent;
   window.addEventListener('command-knowledge-insert', quickCommandHandler);
   window.addEventListener('terminal-theme-changed', handleTerminalThemeChanged);
-  window.addEventListener('main-ui-settings-changed', handleMainUiChanged);
+  window.addEventListener('global-background-availability-changed', handleGlobalBackgroundAvailabilityChanged);
   window.addEventListener('terminal-layout-resize', handleLayoutResize);
   window.addEventListener('terminal-layout-dragging', handleLayoutDragging);
   window.addEventListener('terminal:toggle-line-numbers', handleExternalLineNumberToggle);
@@ -3535,7 +3535,7 @@ onUnmounted(() => {
   terminalCache.delete(props.sessionId);
   window.removeEventListener('keydown', handleKeydown);
   window.removeEventListener('terminal-theme-changed', handleTerminalThemeChanged);
-  window.removeEventListener('main-ui-settings-changed', handleMainUiChanged);
+  window.removeEventListener('global-background-availability-changed', handleGlobalBackgroundAvailabilityChanged);
   window.removeEventListener('terminal-layout-resize', handleLayoutResize);
   window.removeEventListener('terminal-layout-dragging', handleLayoutDragging);
   window.removeEventListener('terminal:toggle-line-numbers', handleExternalLineNumberToggle);
